@@ -41,13 +41,13 @@
 #include "rotator.h"
 #include "config_indi.h"
 #include "indi_gui.h"
-#include "phdindiclient.h"
+#include "libindi/baseclient.h"
 
 #include <libindi/basedevice.h>
 #include <libindi/indiproperty.h>
 
 
-class RotatorINDI : public Rotator, public PhdIndiClient {
+class RotatorINDI : public Rotator, public INDI::BaseClient {
 	public:
 		RotatorINDI();
 		~RotatorINDI();
@@ -79,19 +79,15 @@ class RotatorINDI : public Rotator, public PhdIndiClient {
 		void updateAngle();
 
 	protected:
-		void IndiServerConnected() override;
-		void IndiServerDisconnected(int exit_code) override;
-		void newDevice(INDI::BaseDevice *dp) override;
-		void removeDevice(INDI::BaseDevice *dp) override;
-		void newProperty(INDI::Property *property) override;
-		void newSwitch(ISwitchVectorProperty *svp) override;
-		void newNumber(INumberVectorProperty *nvp) override;
-		void newMessage(INDI::BaseDevice *dp, int messageID) override;
+		// void serverConnected() override;
+		void serverDisconnected(int exit_code) override;
+		void newDevice(INDI::BaseDevice dp) override;
+		void removeDevice(INDI::BaseDevice dp) override;
+		void newProperty(INDI::Property property) override;
+		void updateProperty(INDI::Property property) override;
+		void newMessage(INDI::BaseDevice dp, int messageID) override;
 
-		void removeProperty(INDI::Property *property) override {};
-		void newBLOB(IBLOB *bp) override {};
-		void newText(ITextVectorProperty *tvp) override {};
-		void newLight(ILightVectorProperty *lvp) override {};
+		void removeProperty(INDI::Property property) override {};
 
 	private:
 		void ShowPropertyDialog() override;
@@ -126,9 +122,17 @@ bool RotatorINDI::Connect() {
 	if ( INDIRotatorName == wxT("INDI Rotator") ) {
 		RotatorSetup();
 	}
+
+	if(isServerConnected()) {
+		return false;
+	}
+
 	Debug.Write(wxString::Format("INDI Rotator connecting to device [%s]\n", INDIRotatorName));
 	setServer(INDIhost.mb_str(wxConvUTF8), INDIport);
 	watchDevice(INDIRotatorName.mb_str(wxConvUTF8));
+
+	return !connectServer();
+/*
 	if ( connectServer() ) {
 		Debug.Write(wxString::Format("INDI Rotator: connectServer done ready = %d\n", m_ready));
 		return !m_ready;
@@ -140,6 +144,7 @@ bool RotatorINDI::Connect() {
 		Debug.Write(wxString::Format("INDI Rotator: connectServer [2] done ready = %d\n", m_ready));
 	}
 	return true;
+*/
 }
 
 RotatorINDI::RotatorINDI() : m_gui(nullptr) {
@@ -154,10 +159,11 @@ RotatorINDI::~RotatorINDI() {
 	if ( m_gui ) {
 		IndiGui::DestroyIndiGui(&m_gui);
 	}
-	DisconnectIndiServer();
+	disconnectServer();
 }
 
-void RotatorINDI::IndiServerConnected() {
+/*
+void RotatorINDI::serverConnected() {
 	struct ConnectInBg : public ConnectRotatorInBg {
 		RotatorINDI *rotator;
 		ConnectInBg(RotatorINDI *rotator_) : rotator(rotator_) { }
@@ -176,8 +182,9 @@ void RotatorINDI::IndiServerConnected() {
 		Rotator::Connect();
 	}
 }
+*/
 
-void RotatorINDI::IndiServerDisconnected(int exit_code) {
+void RotatorINDI::serverDisconnected(int exit_code) {
 	ClearStatus();
 	if ( exit_code == -1 ) {
 		pFrame->Alert(wxString(_("INDI server disconnected")));
@@ -185,7 +192,7 @@ void RotatorINDI::IndiServerDisconnected(int exit_code) {
 	}
 }
 
-void RotatorINDI::removeDevice(INDI::BaseDevice *dp) {
+void RotatorINDI::removeDevice(INDI::BaseDevice dp) {
 	ClearStatus();
 	Disconnect();
 }
@@ -286,31 +293,31 @@ bool RotatorINDI::ConnectToDriver(RunInBg *r) {
 }
 
 bool RotatorINDI::Disconnect() {
-	DisconnectIndiServer();
+	disconnectServer();
 	ClearStatus();
 	Rotator::Disconnect();
 	return false;
 }
 
-void RotatorINDI::newProperty(INDI::Property *property) {
-	wxString PropName(property->getName());
-	INDI_PROPERTY_TYPE Proptype = property->getType();
+void RotatorINDI::newProperty(INDI::Property property) {
+	wxString PropName(property.getName());
+	INDI_PROPERTY_TYPE Proptype = property.getType();
 
 	Debug.Write(wxString::Format("INDI Rotator: Received property: %s\n", PropName));
 
 	if ( Proptype == INDI_NUMBER && PropName == "ABS_ROTATOR_ANGLE" ) {
 		if ( INDIConfig::Verbose() ) {
 			Debug.Write(wxString::Format(_("INDI Rotator found ABS_ROTATOR_ANGLE for %s %s\n"),
-							property->getDeviceName(), PropName));
+							property.getDeviceName(), PropName));
 		}
-		angle_prop = property->getNumber();
+		angle_prop = property.getNumber();
 	}
 	if ( Proptype == INDI_SWITCH && PropName == "CONNECTION" ) {
 		if ( INDIConfig::Verbose() ) {
 			Debug.Write(wxString::Format(_("INDI Rotator found CONNECTION for %s %s\n"),
-						property->getDeviceName(), PropName));
+						property.getDeviceName(), PropName));
 		}
-		connection_prop = property->getSwitch();
+		connection_prop = property.getSwitch();
 		ISwitch *connectswitch = IUFindSwitch(connection_prop, "CONNECT");
 		if ( connectswitch->s == ISS_ON ) {
 			Rotator::Connect();
@@ -319,46 +326,56 @@ void RotatorINDI::newProperty(INDI::Property *property) {
 	CheckState();
 }
 
-void RotatorINDI::newMessage(INDI::BaseDevice *dp, int messageID) {
+void RotatorINDI::newMessage(INDI::BaseDevice dp, int messageID) {
 	if ( INDIConfig::Verbose() ) {
-		Debug.Write(wxString::Format(_("INDI Rotator received message: %s\n"), dp->messageQueue(messageID)));
+		Debug.Write(wxString::Format(_("INDI Rotator received message: %s\n"), dp.messageQueue(messageID)));
 	}
 }
 
-void RotatorINDI::newNumber(INumberVectorProperty *nvp) {
+void RotatorINDI::newDevice(INDI::BaseDevice dp) {
 	if ( INDIConfig::Verbose() ) {
-		Debug.Write(wxString::Format(_("INDI Rotator: New number: %s\n"), nvp->name));
-	}
-	if ( strcmp(nvp->name, "ABS_ROTATOR_ANGLE") == 0 ) {
-		updateAngle();
+		Debug.Write(wxString::Format("INDI Rotator new device %s\n", dp.getDeviceName()));
 	}
 }
 
-void RotatorINDI::newDevice(INDI::BaseDevice *dp) {
-	if ( INDIConfig::Verbose() ) {
-		Debug.Write(wxString::Format("INDI Rotator new device %s\n", dp->getDeviceName()));
-	}
-}
-
-void RotatorINDI::newSwitch(ISwitchVectorProperty *svp) {
-	if ( INDIConfig::Verbose() ) {
-		Debug.Write(wxString::Format("INDI Rotator: Receiving Switch: %s = %i\n",
-					svp->name, svp->sp->s));
-	}
-	if ( strcmp(svp->name, "CONNECTION") == 0 ) {
-		ISwitch *connectswitch = IUFindSwitch(svp, "CONNECT");
-		if ( connectswitch->s == ISS_ON ) {
-			Rotator::Connect();
-		} else {
-			if ( m_ready ) {
-				ClearStatus();
-				PhdApp::ExecInMainThread(
-						[this]() {
-						pFrame->Alert(_("INDI rotator was disconnected"));
-						Disconnect();
-						});
+void RotatorINDI::updateProperty(INDI::Property property) {
+	switch(property.getType()) {
+		case INDI_SWITCH:
+		{
+			auto* svp = property.getSwitch();
+			if ( INDIConfig::Verbose() ) {
+				Debug.Write(wxString::Format("INDI Rotator: Receiving Switch: %s = %i\n",
+							svp->name, svp->sp->s));
 			}
-		}
+			if ( strcmp(svp->name, "CONNECTION") == 0 ) {
+				ISwitch *connectswitch = IUFindSwitch(svp, "CONNECT");
+				if ( connectswitch->s == ISS_ON ) {
+					Rotator::Connect();
+					CheckState();
+				} else {
+					if ( m_ready ) {
+						ClearStatus();
+						PhdApp::ExecInMainThread(
+								[this]() {
+								pFrame->Alert(_("INDI rotator was disconnected"));
+								Disconnect();
+								});
+					}
+				}
+			}
+		} break;
+		case INDI_NUMBER:
+		{
+			auto* nvp = property.getNumber();
+			if ( INDIConfig::Verbose() ) {
+				Debug.Write(wxString::Format(_("INDI Rotator: New number: %s\n"), nvp->name));
+			}
+			if ( strcmp(nvp->name, "ABS_ROTATOR_ANGLE") == 0 ) {
+				updateAngle();
+			}
+		} break;
+		default:
+			break;
 	}
 }
 
